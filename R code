@@ -1,0 +1,261 @@
+# Create and customize interactive maps using the 'Leaflet' JavaScript library 
+#   and the 'htmlwidgets' package.
+# These maps can be used directly from the R console, from 'RStudio',
+#   in Shiny applications and R Markdown documents.
+
+# https://yijutseng.github.io/DataScienceRBook/io.html
+# 許多 Open Data 用 JSON 格式儲存，
+# 將 JSON 檔案匯入 R 可以使用 jsonlite package，
+# 套件使用前必須安裝，載入後，可使用 fromJSON() 函數載入 JSON 資料。
+# 如需直接從 API 網址截取資料，
+# 需要載入 RCurl package，並使用 getURL() 函數處理資料擷取網址。
+# https://data.gov.tw/dataset/34986
+# https://g0v.hackmd.io/@kiang/mask-info
+# https://github.com/kiang/pharmacies
+# 直接由網路讀取資料
+
+rm(list=ls(all=TRUE))
+library(readr)
+library(data.table)
+library(readxl)
+library(stringr)
+library(leaflet)
+# leaflet 學習可參考 https://rstudio.github.io/leaflet/
+
+# 健保特約機構口罩剩餘數量明細清單
+mask_csv = "https://data.nhi.gov.tw/resource/mask/maskdata.csv"
+# mask_csv = "c:/tmp/maskdata.csv"
+
+# read.table(mask_csv, header=T, sep=",")
+# read.csv(mask_csv, header=T, sep=",")
+# Error in read.table(mask_csv, header=T, sep=",") : 
+#   more columns than column names
+
+mask = readr::read_csv(mask_csv, col_names=T)
+mask = data.table::fread(input=mask_csv, header=T, encoding="UTF-8")
+# readr::read_csv, data.table::fread 二種讀取 .csv 均可，
+# data.table::fread => 結果為 data.table 格式 
+# (另一種宣稱計算速度較快的 dataframe 格式)，
+# readr::read_csv => 結果為一般 data.frame 格式。
+# 經過研究，data.table::fread 讀取 .csv 的速度較快。。
+
+# 特約藥局配送口罩名單下載
+drug_store_xlsx = "http://ws.nhi.gov.tw/Download.ashx?u=LzAwMS9VcGxvYWQvMjkyL2NrZmlsZS9jNmIwMGQzYi0xNTdjLTQ4YjgtYjJjNi1lNGM5OTFmMzQyMGMueGxzeA%3d%3d&n=MTA5MDIyN%2bS4i%2bWNiF%2fnibnntITol6XlsYDphY3pgIHlj6PnvanlkI3llq4o6KiINjI4MOWutinvvI3liqDoqLvoqJgueGxzeA%3d%3d&icon=.xlsx"
+# google => r readxl read xlsx url 
+# => https://stackoverflow.com/questions/41368628/read-excel-file-from-a-url-using-the-readxl-package
+# https://www.rdocumentation.org/packages/readxl/versions/0.1.1/topics/read_excel
+tmp = tempfile(fileext=".xlsx")
+download.file(url=drug_store_xlsx, destfile=tmp, mode="wb")
+# httr::GET(url=drug_store_xlsx, httr::write_disk(tmp))
+# 以上二個寫法均可。
+drug_store = readxl::read_excel(tmp, sheet=1, col_names=TRUE, skip=1)
+# 第一列為說明，第二列才是變數名稱，所以設定參數 skip=1。
+
+drug_store = drug_store[c("醫事機構代碼", "備註")]
+colnames(drug_store) = c("醫事機構代碼", "備註1")
+
+# kiang 提供的藥局 (包含健保特約機構經緯度資料)+衛生所即時庫存
+# API 網址如下：
+# https://raw.githubusercontent.com/kiang/pharmacies/master/raw/lanma.csv
+# https://raw.githubusercontent.com/kiang/pharmacies/master/json/points.json
+
+# 直接由網路讀取 .csv
+location_file = "https://raw.githubusercontent.com/kiang/pharmacies/master/raw/lanma.csv"
+location = data.table::fread(input=location_file, header=T, encoding="UTF-8")
+# service_periods:
+# 代表看診星期，有 21 位元，1~7 為每周一至周日上午開診情形，
+# 8~14 為每周一至周日下午開診情形，15~21 為每周一至周日晚上開診情形，
+# N=開診，Y =休診，
+# 因此 NNNNNNYNNNNNNYNNNNNNY 表示星期日整天休診，其它時間開診。
+
+location = data.frame(location)
+# 轉換為一般 data.frame 格式。
+
+location = location[c("醫事機構代碼", "緯度", "經度", "備註")]
+colnames(location) = c("醫事機構代碼", "緯度", "經度", "備註2")
+df = merge(mask, drug_store, by="醫事機構代碼", all=T) 
+df = merge(df, location, by="醫事機構代碼", all=T) 
+
+df_notNA = df[!is.na(df$`成人口罩剩餘數`),]
+# 刪除 df$`成人口罩剩餘數` 為 NA 的資料。
+df_notempty = df_notNA[df_notNA$`成人口罩剩餘數` != 0,]
+# 刪除 df$`成人口罩剩餘數` 為 0 的資料。
+
+df$popup = paste0("醫事機構代碼: ", df$`醫事機構代碼`, "<br>",
+                  "醫事機構名稱: ", df$`醫事機構名稱`, "<br>",
+                  "醫事機構地址: ", df$`醫事機構地址`, "<br>",
+                  "醫事機構電話: ", df$`醫事機構電話`, "<br>",
+                  "成人口罩剩餘數: ", df$`成人口罩剩餘數`, "<br>",
+                  "兒童口罩剩餘數: ", df$`兒童口罩剩餘數`, "<br>",
+                  "來源資料時間: ", df$`來源資料時間`, "<br>",
+                  "經度: ", df$`經度`, "<br>",
+                  "緯度: ", df$`緯度`, "<br>",
+                  "備註1: ", df$`備註1`, "<br>",
+                  "備註2: ", df$`備註2`, "<br>"
+                  )
+
+# leaflet - addCircles+popup
+map1 <- leaflet() %>%
+  addTiles() %>%
+  addCircles(data=df, lng=~`經度`, lat=~`緯度`, popup=~popup)
+# Warning message:
+# In validateCoords(lng, lat, funcName) :
+# Data contains 356 rows with either missing or invalid lat/lon values and will be ignored
+map1
+htmlwidgets::saveWidget(map1, file="c:/tmp/03-mask_map_leaflet1_1.html")
+
+
+# leaflet - addCircles+popup
+# google => r, leaflet, addCircle, color
+# => https://rstudio.github.io/leaflet/colors.html
+# Create a continuous palette function (兩種不同的方式)
+pal1 = leaflet::colorNumeric(palette="Blues", domain=df$`成人口罩剩餘數`)
+pal2 = leaflet::colorBin("Blues", df$`成人口罩剩餘數`, n=10)
+pal1(df$`成人口罩剩餘數`)
+pal2(df$`成人口罩剩餘數`)
+# 依 df$`成人口罩剩餘數` 大小轉換顏色。
+# 顏色越淺代表數量越少，灰色代表 NA。
+map2 <- leaflet() %>%
+  addTiles() %>%
+  addCircles(data=df, 
+             lng=~`經度`, 
+             lat=~`緯度`,
+             color=~pal1(`成人口罩剩餘數`),
+             fillOpacity=1,
+             popup=~popup)
+map2
+htmlwidgets::saveWidget(map2, file="c:/tmp/03-mask_map_leaflet1_2.html")
+
+
+# leaflet - addCircleMarkers+popup
+map3 = leaflet() %>% 
+  addTiles() %>%
+  # Add default OpenStreetMap map tiles (openStreetMap 正常的世界地圖)
+  addCircleMarkers(data=df,
+                   lng=~`經度`, 
+                   lat=~`緯度`,
+                   radius=4,
+                   fillOpacity=0.9, 
+                   popup=~popup)
+map3
+htmlwidgets::saveWidget(map3, file="c:/tmp/03-mask_map_leaflet1_3.html")
+
+
+# leaflet - addMarkers+popup
+path = "c:/tmp/"
+logo = paste0(path, "logo.png")
+icon = leaflet::makeIcon(logo, iconWidth=14, iconHeight=14)
+map4 = leaflet() %>% 
+  addTiles() %>%
+  # Add default OpenStreetMap map tiles (openStreetMap 正常的世界地圖)
+  addMarkers(data=df,
+             lng=~`經度`, 
+             lat=~`緯度`,
+             popup=~popup,
+             icon=icon)
+map4
+htmlwidgets::saveWidget(map4, file="c:/tmp/03-mask_map_leaflet1_4.html")
+
+
+# leaflet - addMarkers+Cluster+popup
+logo = paste0(path, "logo.png")
+# icon = paste0(path, "logo.png")
+# https://www.flaticon.com/free-icons/map/
+icon = leaflet::makeIcon(logo, iconWidth=14, iconHeight=14)
+map5 = leaflet() %>% 
+  addTiles() %>%
+  # Add default OpenStreetMap map tiles (openStreetMap 正常的世界地圖)
+  addMarkers(data=df, 
+             lng=~`經度`, 
+             lat=~`緯度`, 
+             icon=icon,
+             popup=~popup,
+             clusterOptions=markerClusterOptions())
+map5
+htmlwidgets::saveWidget(map5, file="c:/tmp/03-mask_map_leaflet1_5.html")
+
+
+# leaflet - Heatmap 1 (第一組參數，內建值)
+# addHeatmap() 需要用到 leaflet.extras Package.
+library(leaflet.extras)
+logo = paste0(path, "logo.png")
+icon = leaflet::makeIcon(logo, iconWidth=6, iconHeight=6)
+
+df = df[!(is.na(df$`經度`)) | !(is.na(df$`緯度`)),]
+library(tidyr)
+df = df %>% drop_na(`經度`, `緯度`)
+# df = na.omit(df)
+# 會刪除 df 有變數為 NA 的列，
+# 若 df 剛好有變數所有的值均為 NA，所有資料就都被刪除了，
+# 而 leaflet - addHeatmap 又不支援經緯度 (經度, 緯度) 為 missing value (NA)，
+# 可以以下二種 (擇一) 寫法解決：
+# df = df[!(is.na(df$`經度`)) | !(is.na(df$`緯度`)),]
+# 或
+# library(tidyr)
+# df = df %>% drop_na(`經度`, `緯度`)
+# 就只會刪除只有 經度, 緯度 為 NA 的列。
+
+map6 = leaflet() %>%
+  addTiles() %>%
+  addMarkers(data=df, 
+             lng=~`經度`,
+             lat=~`緯度`, 
+             icon=icon, 
+             popup=~popup) %>%
+  addHeatmap(data=df, group="heat", lng=~`經度`, lat=~`緯度`)
+  # https://www.rdocumentation.org/packages/leaflet.extras/versions/0.2/topics/addHeatmap
+map6
+htmlwidgets::saveWidget(map6, file="c:/tmp/03-mask_map_leaflet1_6.html")
+
+
+# leaflet - Heatmap 2 (第二組參數)
+logo = paste0(path, "logo.png")
+icon = leaflet::makeIcon(logo, iconWidth=6, iconHeight=6)
+map7 = leaflet() %>%
+  addTiles() %>%
+  addMarkers(data=df, 
+             lng=~`經度`, 
+             lat=~`緯度`, 
+             icon=icon,
+             popup=~popup) %>%
+  addHeatmap(data=df,
+             group="heat", 
+             lng=~`經度`, 
+             lat=~`緯度`, 
+             max=0.6,
+             blur=30, 
+             radius=15) 
+  # max: maximum point intensity. The default is 1.0
+  # blur: amount of blur to apply. The default is 15. blur=1 means no blur.
+  # https://www.rdocumentation.org/packages/leaflet.extras/versions/0.2/topics/addHeatmap
+map7
+htmlwidgets::saveWidget(map7, file="c:/tmp/03-mask_map_leaflet1_7.html")
+
+
+# leaflet - Heatmap 3 (第三組參數)
+logo = paste0(path, "logo.png")
+icon = leaflet::makeIcon(logo, iconWidth=6, iconHeight=6)
+map8 = df %>% 
+  leaflet() %>%
+  addTiles() %>%
+  addMarkers(lng=~`經度`, 
+             lat=~`緯度`, 
+             icon=icon, 
+             popup=~popup) %>%
+  addHeatmap(group="heat", 
+             lng=~`經度`,
+             lat=~`緯度`,
+             max=0.6, 
+             blur=60,
+             radius=30)
+  # max: maximum point intensity. The default is 1.0
+  # blur: amount of blur to apply. The default is 15. blur=1 means no blur.
+  # https://www.rdocumentation.org/packages/leaflet.extras/versions/0.2/topics/addHeatmap
+map8
+htmlwidgets::saveWidget(map8, file="c:/tmp/03-mask_map_leaflet1_8.html")
+
+# Publish to RPubs 作法：
+# Publish => RPubs => Publish => 
+# 填寫 Username or Email 和 Passwaod (需先 Create a Account) => sign =>
+# Title, Description, Slug => 網址名 (例如 map_test) => Continue =>
+# 發佈到 RPubs, 網址為 ... (http://rpubs.com/ypchang/map_test)
